@@ -1,13 +1,71 @@
 import { Router, Response } from 'express';
+import multer from 'multer';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { AuthenticatedRequest } from '../middleware/auth.js';
 
 const router = Router();
 
+const INVOICE_BUCKET = 'invoices';
+const MAX_PDF_BYTES = 15 * 1024 * 1024;
+
+const pdfUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_PDF_BYTES },
+  fileFilter: (_req, file, cb) => {
+    const looksPdf =
+      file.mimetype === 'application/pdf' ||
+      file.mimetype === 'application/x-pdf' ||
+      /\.pdf$/i.test(file.originalname);
+    if (looksPdf) cb(null, true);
+    else cb(new Error('Only PDF uploads are allowed'));
+  },
+});
+
+const invoiceMultipartParser = pdfUpload.fields([
+  { name: 'file', maxCount: 1 },
+  { name: 'invoiceFile', maxCount: 1 },
+]);
+
 function optionalText(v: unknown): string | null {
   if (v == null) return null;
   const s = String(v).trim();
   return s === '' ? null : s;
+}
+
+function parseAmount(v: unknown): number | null {
+  if (v == null || v === '') return null;
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseGst(v: unknown): boolean {
+  if (typeof v === 'boolean') return v;
+  if (v === 'true' || v === '1') return true;
+  return false;
+}
+
+function getUploadedPdf(req: AuthenticatedRequest): Express.Multer.File | undefined {
+  const raw = req.files;
+  if (!raw || Array.isArray(raw)) return undefined;
+  const files = raw as Record<string, Express.Multer.File[] | undefined>;
+  return files.file?.[0] ?? files.invoiceFile?.[0];
+}
+
+function parseMultipartIfNeeded(
+  req: AuthenticatedRequest,
+  res: Response,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const ct = (req.headers['content-type'] || '').toLowerCase();
+    if (!ct.includes('multipart/form-data')) {
+      resolve();
+      return;
+    }
+    invoiceMultipartParser(req, res, (err: unknown) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
 }
 
 // GET /api/invoices - List invoices based on role
@@ -57,8 +115,11 @@ router.get('/:id', async (req: AuthenticatedRequest, res: Response) => {
 });
 
 // POST /api/invoices - Create new invoice (creator only)
+// Supports application/json or multipart/form-data (optional PDF: field "file" or "invoiceFile")
 router.post('/', async (req: AuthenticatedRequest, res: Response) => {
   try {
+    await parseMultipartIfNeeded(req, res);
+
     const user = req.user!;
 
     if (user.role !== 'creator') {
@@ -66,16 +127,34 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
       return;
     }
 
-    const { campaign, amount, gst, account_no, ifsc, assigned_im } = req.body;
+    const body = req.body as Record<string, unknown>;
+    const pdfFile = getUploadedPdf(req);
+    const hasPdf = Boolean(pdfFile?.buffer?.length);
 
+    const campaign = optionalText(body.campaign);
+    const amount = parseAmount(body.amount);
+    const assigned_im = optionalText(body.assigned_im ?? body.assignedIm);
+    const account_no = optionalText(body.account_no ?? body.accountNo);
+    const ifsc = optionalText(body.ifsc);
     const account_holder_name = optionalText(
-      req.body.accountHolderName ?? req.body.account_holder_name,
+      body.accountHolderName ?? body.account_holder_name,
     );
-    const pan_number = optionalText(req.body.panNumber ?? req.body.pan_number);
-    const gst_number = optionalText(req.body.gstNumber ?? req.body.gst_number);
+    const pan_number = optionalText(body.panNumber ?? body.pan_number);
+    const gst_number = optionalText(body.gstNumber ?? body.gst_number);
+    const gst = parseGst(body.gst);
 
-    if (!campaign || amount == null || !account_no || !ifsc || !assigned_im) {
-      res.status(400).json({ error: 'Missing required fields: campaign, amount, account_no, ifsc, assigned_im' });
+    if (!campaign || amount == null || !assigned_im) {
+      res.status(400).json({
+        error: 'Missing required fields: campaign, amount, assigned_im',
+      });
+      return;
+    }
+
+    if (!hasPdf && (!account_no || !ifsc)) {
+      res.status(400).json({
+        error:
+          'Missing required fields: account_no, ifsc (or upload a PDF invoice so banking/tax fields are optional)',
+      });
       return;
     }
 
@@ -99,6 +178,26 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
 
     const invoiceId = `${prefix}${String(nextNumber).padStart(4, '0')}`;
 
+    let invoice_file_url: string | null = null;
+
+    if (hasPdf && pdfFile) {
+      const storagePath = `${user.id}/${invoiceId}.pdf`;
+      const { error: uploadError } = await supabaseAdmin.storage
+        .from(INVOICE_BUCKET)
+        .upload(storagePath, pdfFile.buffer, {
+          contentType: 'application/pdf',
+          upsert: false,
+        });
+
+      if (uploadError) {
+        res.status(500).json({ error: uploadError.message });
+        return;
+      }
+
+      const { data: pub } = supabaseAdmin.storage.from(INVOICE_BUCKET).getPublicUrl(storagePath);
+      invoice_file_url = pub.publicUrl;
+    }
+
     const { data: invoice, error } = await supabaseAdmin
       .from('invoices')
       .insert({
@@ -107,24 +206,28 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
         creator_name: user.name,
         campaign,
         amount,
-        gst: gst ?? false,
-        account_no,
-        ifsc,
+        gst,
+        account_no: account_no ?? null,
+        ifsc: ifsc ?? null,
         assigned_im,
-        account_holder_name,
-        pan_number,
-        gst_number,
+        account_holder_name: account_holder_name ?? null,
+        pan_number: pan_number ?? null,
+        gst_number: gst_number ?? null,
+        invoice_file_url,
         status: 'submitted',
       })
       .select()
       .single();
 
     if (error) {
+      if (hasPdf && invoice_file_url) {
+        const path = `${user.id}/${invoiceId}.pdf`;
+        await supabaseAdmin.storage.from(INVOICE_BUCKET).remove([path]);
+      }
       res.status(500).json({ error: error.message });
       return;
     }
 
-    // Insert audit log entry
     await supabaseAdmin.from('audit_log').insert({
       invoice_id: invoiceId,
       action: 'Submitted',
@@ -133,6 +236,18 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
 
     res.status(201).json(invoice);
   } catch (err) {
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        res.status(400).json({ error: 'PDF exceeds maximum allowed size' });
+        return;
+      }
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    if (err instanceof Error && err.message === 'Only PDF uploads are allowed') {
+      res.status(400).json({ error: err.message });
+      return;
+    }
     res.status(500).json({ error: 'Failed to create invoice' });
   }
 });
