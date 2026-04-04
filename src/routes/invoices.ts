@@ -7,11 +7,6 @@ const router = Router();
 
 const INVOICE_BUCKET = 'invoices';
 const MAX_PDF_BYTES = 15 * 1024 * 1024;
-const SIGNED_URL_TTL_SECONDS = Math.min(
-  Math.max(60, Number(process.env.INVOICE_FILE_SIGNED_URL_TTL_SECONDS) || 3600),
-  60 * 60 * 24 * 7,
-);
-
 type InvoiceRow = {
   id: string;
   creator_id: string;
@@ -34,20 +29,23 @@ function canAccessInvoice(user: UserProfile, invoice: InvoiceRow): boolean {
   return false;
 }
 
-/** Resolves the storage object path for PDF signing (supports legacy public URLs in invoice_file_url). */
-function resolveInvoiceStoragePath(invoice: InvoiceRow): string | null {
-  const pathCol = optionalText(invoice.invoice_file_path);
-  if (pathCol) return pathCol;
+/**
+ * `invoice_file_url` may hold a raw object path or a legacy public object URL.
+ * Falls back to `invoice_file_path` when `invoice_file_url` is empty (current uploads).
+ */
+function resolveStoragePathFromInvoiceFileUrl(
+  invoice: InvoiceRow,
+): string | null {
+  const stored =
+    optionalText(invoice.invoice_file_url) ?? optionalText(invoice.invoice_file_path);
+  if (!stored) return null;
 
-  const urlOrPath = optionalText(invoice.invoice_file_url);
-  if (!urlOrPath) return null;
-
-  if (!urlOrPath.startsWith('http://') && !urlOrPath.startsWith('https://')) {
-    return urlOrPath;
+  if (!stored.startsWith('http://') && !stored.startsWith('https://')) {
+    return stored;
   }
 
   try {
-    const u = new URL(urlOrPath);
+    const u = new URL(stored);
     const segments = u.pathname.split('/').filter(Boolean);
     const bucketIdx = segments.indexOf(INVOICE_BUCKET);
     if (bucketIdx >= 0 && bucketIdx < segments.length - 1) {
@@ -160,7 +158,7 @@ router.get('/', async (req: AuthenticatedRequest, res: Response) => {
   }
 });
 
-// GET /api/invoices/:id/file-url — short-lived signed URL for private bucket PDFs
+// GET /api/invoices/:id/file-url — signed URL (1h) for private bucket; body: { signed_url }
 router.get('/:id/file-url', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
@@ -185,21 +183,21 @@ router.get('/:id/file-url', async (req: AuthenticatedRequest, res: Response) => 
       return;
     }
 
-    const storagePath = resolveInvoiceStoragePath(row);
+    const storagePath = resolveStoragePathFromInvoiceFileUrl(row);
     if (!storagePath) {
-      res.status(404).json({ error: 'No invoice file uploaded for this invoice' });
+      res.status(404).json({ error: 'Invoice file not found' });
       return;
     }
 
     const exists = await storageObjectExists(storagePath);
     if (!exists) {
-      res.status(404).json({ error: 'Invoice file not found in storage' });
+      res.status(404).json({ error: 'Invoice file not found' });
       return;
     }
 
     const { data: signed, error: signError } = await supabaseAdmin.storage
       .from(INVOICE_BUCKET)
-      .createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS);
+      .createSignedUrl(storagePath, 3600);
 
     if (signError || !signed?.signedUrl) {
       res.status(500).json({
@@ -208,10 +206,7 @@ router.get('/:id/file-url', async (req: AuthenticatedRequest, res: Response) => 
       return;
     }
 
-    res.json({
-      signedUrl: signed.signedUrl,
-      expiresInSeconds: SIGNED_URL_TTL_SECONDS,
-    });
+    res.json({ signed_url: signed.signedUrl });
   } catch (err) {
     res.status(500).json({ error: 'Failed to create download link' });
   }
@@ -343,8 +338,8 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
         account_holder_name: account_holder_name ?? null,
         pan_number: pan_number ?? null,
         gst_number: gst_number ?? null,
-        invoice_file_path,
-        invoice_file_url: null,
+        invoice_file_path: invoice_file_path,
+        invoice_file_url: invoice_file_path,
         status: 'submitted',
       })
       .select()
