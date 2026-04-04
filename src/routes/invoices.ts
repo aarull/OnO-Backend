@@ -4,6 +4,12 @@ import { AuthenticatedRequest } from '../middleware/auth.js';
 
 const router = Router();
 
+function optionalText(v: unknown): string | null {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s === '' ? null : s;
+}
+
 // GET /api/invoices - List invoices based on role
 router.get('/', async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -62,6 +68,12 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
 
     const { campaign, amount, gst, account_no, ifsc, assigned_im } = req.body;
 
+    const account_holder_name = optionalText(
+      req.body.accountHolderName ?? req.body.account_holder_name,
+    );
+    const pan_number = optionalText(req.body.panNumber ?? req.body.pan_number);
+    const gst_number = optionalText(req.body.gstNumber ?? req.body.gst_number);
+
     if (!campaign || amount == null || !account_no || !ifsc || !assigned_im) {
       res.status(400).json({ error: 'Missing required fields: campaign, amount, account_no, ifsc, assigned_im' });
       return;
@@ -99,6 +111,9 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
         account_no,
         ifsc,
         assigned_im,
+        account_holder_name,
+        pan_number,
+        gst_number,
         status: 'submitted',
       })
       .select()
