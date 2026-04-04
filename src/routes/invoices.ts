@@ -1,12 +1,77 @@
 import { Router, Response } from 'express';
 import multer from 'multer';
 import { supabaseAdmin } from '../lib/supabase.js';
-import { AuthenticatedRequest } from '../middleware/auth.js';
+import { AuthenticatedRequest, UserProfile } from '../middleware/auth.js';
 
 const router = Router();
 
 const INVOICE_BUCKET = 'invoices';
 const MAX_PDF_BYTES = 15 * 1024 * 1024;
+const SIGNED_URL_TTL_SECONDS = Math.min(
+  Math.max(60, Number(process.env.INVOICE_FILE_SIGNED_URL_TTL_SECONDS) || 3600),
+  60 * 60 * 24 * 7,
+);
+
+type InvoiceRow = {
+  id: string;
+  creator_id: string;
+  assigned_im: string | null;
+  invoice_file_path?: string | null;
+  invoice_file_url?: string | null;
+};
+
+function canAccessInvoice(user: UserProfile, invoice: InvoiceRow): boolean {
+  if (user.role === 'accounts') return true;
+  if (user.role === 'creator' && invoice.creator_id === user.id) return true;
+  if (
+    user.role === 'im' &&
+    invoice.assigned_im &&
+    user.im_member_name &&
+    invoice.assigned_im === user.im_member_name
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Resolves the storage object path for PDF signing (supports legacy public URLs in invoice_file_url). */
+function resolveInvoiceStoragePath(invoice: InvoiceRow): string | null {
+  const pathCol = optionalText(invoice.invoice_file_path);
+  if (pathCol) return pathCol;
+
+  const urlOrPath = optionalText(invoice.invoice_file_url);
+  if (!urlOrPath) return null;
+
+  if (!urlOrPath.startsWith('http://') && !urlOrPath.startsWith('https://')) {
+    return urlOrPath;
+  }
+
+  try {
+    const u = new URL(urlOrPath);
+    const segments = u.pathname.split('/').filter(Boolean);
+    const bucketIdx = segments.indexOf(INVOICE_BUCKET);
+    if (bucketIdx >= 0 && bucketIdx < segments.length - 1) {
+      return decodeURIComponent(segments.slice(bucketIdx + 1).join('/'));
+    }
+  } catch {
+    /* fall through */
+  }
+
+  return `${invoice.creator_id}/${invoice.id}.pdf`;
+}
+
+async function storageObjectExists(path: string): Promise<boolean> {
+  const lastSlash = path.lastIndexOf('/');
+  const folder = lastSlash >= 0 ? path.slice(0, lastSlash) : '';
+  const fileName = lastSlash >= 0 ? path.slice(lastSlash + 1) : path;
+
+  const { data: items, error } = await supabaseAdmin.storage
+    .from(INVOICE_BUCKET)
+    .list(folder, { limit: 10000 });
+
+  if (error || !items) return false;
+  return items.some((o) => o.name === fileName);
+}
 
 const pdfUpload = multer({
   storage: multer.memoryStorage(),
@@ -24,6 +89,7 @@ const pdfUpload = multer({
 const invoiceMultipartParser = pdfUpload.fields([
   { name: 'file', maxCount: 1 },
   { name: 'invoiceFile', maxCount: 1 },
+  { name: 'invoice_pdf', maxCount: 1 },
 ]);
 
 function optionalText(v: unknown): string | null {
@@ -48,7 +114,7 @@ function getUploadedPdf(req: AuthenticatedRequest): Express.Multer.File | undefi
   const raw = req.files;
   if (!raw || Array.isArray(raw)) return undefined;
   const files = raw as Record<string, Express.Multer.File[] | undefined>;
-  return files.file?.[0] ?? files.invoiceFile?.[0];
+  return files.file?.[0] ?? files.invoiceFile?.[0] ?? files.invoice_pdf?.[0];
 }
 
 function parseMultipartIfNeeded(
@@ -94,17 +160,82 @@ router.get('/', async (req: AuthenticatedRequest, res: Response) => {
   }
 });
 
+// GET /api/invoices/:id/file-url — short-lived signed URL for private bucket PDFs
+router.get('/:id/file-url', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    const invoiceId = req.params.id;
+
+    const { data: invoice, error } = await supabaseAdmin
+      .from('invoices')
+      .select(
+        'id, creator_id, assigned_im, invoice_file_path, invoice_file_url',
+      )
+      .eq('id', invoiceId)
+      .single();
+
+    if (error || !invoice) {
+      res.status(404).json({ error: 'Invoice not found' });
+      return;
+    }
+
+    const row = invoice as InvoiceRow;
+    if (!canAccessInvoice(user, row)) {
+      res.status(403).json({ error: 'You do not have access to this invoice file' });
+      return;
+    }
+
+    const storagePath = resolveInvoiceStoragePath(row);
+    if (!storagePath) {
+      res.status(404).json({ error: 'No invoice file uploaded for this invoice' });
+      return;
+    }
+
+    const exists = await storageObjectExists(storagePath);
+    if (!exists) {
+      res.status(404).json({ error: 'Invoice file not found in storage' });
+      return;
+    }
+
+    const { data: signed, error: signError } = await supabaseAdmin.storage
+      .from(INVOICE_BUCKET)
+      .createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS);
+
+    if (signError || !signed?.signedUrl) {
+      res.status(500).json({
+        error: signError?.message || 'Failed to generate signed URL',
+      });
+      return;
+    }
+
+    res.json({
+      signedUrl: signed.signedUrl,
+      expiresInSeconds: SIGNED_URL_TTL_SECONDS,
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create download link' });
+  }
+});
+
 // GET /api/invoices/:id - Get single invoice
 router.get('/:id', async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user!;
+
     const { data, error } = await supabaseAdmin
       .from('invoices')
       .select('*')
       .eq('id', req.params.id)
       .single();
 
-    if (error) {
+    if (error || !data) {
       res.status(404).json({ error: 'Invoice not found' });
+      return;
+    }
+
+    const invoice = data as InvoiceRow;
+    if (!canAccessInvoice(user, invoice)) {
+      res.status(403).json({ error: 'You do not have access to this invoice' });
       return;
     }
 
@@ -115,7 +246,7 @@ router.get('/:id', async (req: AuthenticatedRequest, res: Response) => {
 });
 
 // POST /api/invoices - Create new invoice (creator only)
-// Supports application/json or multipart/form-data (optional PDF: field "file" or "invoiceFile")
+// Supports application/json or multipart/form-data (PDF field: "invoice_pdf", "file", or "invoiceFile")
 router.post('/', async (req: AuthenticatedRequest, res: Response) => {
   try {
     await parseMultipartIfNeeded(req, res);
@@ -178,7 +309,7 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
 
     const invoiceId = `${prefix}${String(nextNumber).padStart(4, '0')}`;
 
-    let invoice_file_url: string | null = null;
+    let invoice_file_path: string | null = null;
 
     if (hasPdf && pdfFile) {
       const storagePath = `${user.id}/${invoiceId}.pdf`;
@@ -194,8 +325,7 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
         return;
       }
 
-      const { data: pub } = supabaseAdmin.storage.from(INVOICE_BUCKET).getPublicUrl(storagePath);
-      invoice_file_url = pub.publicUrl;
+      invoice_file_path = storagePath;
     }
 
     const { data: invoice, error } = await supabaseAdmin
@@ -213,16 +343,16 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
         account_holder_name: account_holder_name ?? null,
         pan_number: pan_number ?? null,
         gst_number: gst_number ?? null,
-        invoice_file_url,
+        invoice_file_path,
+        invoice_file_url: null,
         status: 'submitted',
       })
       .select()
       .single();
 
     if (error) {
-      if (hasPdf && invoice_file_url) {
-        const path = `${user.id}/${invoiceId}.pdf`;
-        await supabaseAdmin.storage.from(INVOICE_BUCKET).remove([path]);
+      if (hasPdf && invoice_file_path) {
+        await supabaseAdmin.storage.from(INVOICE_BUCKET).remove([invoice_file_path]);
       }
       res.status(500).json({ error: error.message });
       return;
