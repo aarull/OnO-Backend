@@ -1,0 +1,7 @@
+services:
+  - type: web
+    runtime: node
+    name: ono-backend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
