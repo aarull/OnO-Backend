@@ -414,14 +414,28 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
         return;
       }
     } else if (user.role === 'accounts') {
-      if (status !== 'released') {
-        res.status(403).json({ error: 'Accounts can only set status to: released' });
+      const accountsAllowedStatuses = ['audit_cleared', 'audit_rejected', 'released'] as const;
+      if (!accountsAllowedStatuses.includes(status)) {
+        res.status(403).json({
+          error: `Accounts can only set status to: ${accountsAllowedStatuses.join(', ')}`,
+        });
         return;
       }
 
-      if (invoice.status !== 'im_approved') {
-        res.status(400).json({ error: 'Can only release invoices that are IM approved' });
-        return;
+      if (status === 'released') {
+        if (invoice.status !== 'audit_cleared') {
+          res.status(400).json({
+            error: 'Can only release invoices that are audit cleared',
+          });
+          return;
+        }
+      } else if (status === 'audit_cleared' || status === 'audit_rejected') {
+        if (invoice.status !== 'im_approved') {
+          res.status(400).json({
+            error: 'Audit actions are only allowed after IM approval',
+          });
+          return;
+        }
       }
     } else {
       res.status(403).json({ error: 'You do not have permission to change invoice status' });
@@ -434,7 +448,7 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
       updated_at: new Date().toISOString(),
     };
 
-    if (status === 'rejected' && rejection_note) {
+    if ((status === 'rejected' || status === 'audit_rejected') && rejection_note) {
       updateData.rejection_note = rejection_note;
     }
 
@@ -455,6 +469,8 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
       im_review: 'Marked as IM Review',
       im_approved: 'IM Approved',
       rejected: 'Rejected',
+      audit_cleared: 'Audit Cleared',
+      audit_rejected: 'Audit Rejected',
       released: 'Payment Released',
     };
 
