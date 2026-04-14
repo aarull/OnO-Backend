@@ -108,6 +108,64 @@ function parseGst(v: unknown): boolean {
   return false;
 }
 
+/** Applies optional invoice field updates from the body when a creator resubmits after rejection. */
+function applyCreatorResubmitFieldUpdates(
+  body: Record<string, unknown>,
+  updateData: Record<string, unknown>,
+): { error?: string } {
+  if ('campaign' in body) {
+    const c = optionalText(body.campaign);
+    if (c) updateData.campaign = c;
+  }
+  if ('amount' in body) {
+    const a = parseAmount(body.amount);
+    if (a == null) return { error: 'Invalid amount' };
+    updateData.amount = a;
+  }
+  if ('gst' in body) {
+    updateData.gst = parseGst(body.gst);
+  }
+  if ('assigned_im' in body || 'assignedIm' in body) {
+    const im = optionalText(body.assigned_im ?? body.assignedIm);
+    if (im) updateData.assigned_im = im;
+  }
+  if ('account_no' in body || 'accountNo' in body) {
+    updateData.account_no = optionalText(body.account_no ?? body.accountNo);
+  }
+  if ('ifsc' in body || 'ifsc_code' in body || 'ifscCode' in body) {
+    updateData.ifsc = optionalText(body.ifsc ?? body.ifsc_code ?? body.ifscCode);
+  }
+  if ('account_holder_name' in body || 'accountHolderName' in body) {
+    updateData.account_holder_name = optionalText(
+      body.account_holder_name ?? body.accountHolderName,
+    );
+  }
+  if ('pan_number' in body || 'panNumber' in body) {
+    updateData.pan_number = optionalText(body.pan_number ?? body.panNumber);
+  }
+  if ('gst_number' in body || 'gstNumber' in body) {
+    updateData.gst_number = optionalText(body.gst_number ?? body.gstNumber);
+  }
+
+  const bank = body.bank_details;
+  if (bank && typeof bank === 'object' && !Array.isArray(bank)) {
+    const b = bank as Record<string, unknown>;
+    if ('account_no' in b || 'accountNo' in b) {
+      updateData.account_no = optionalText(b.account_no ?? b.accountNo);
+    }
+    if ('ifsc' in b || 'ifsc_code' in b || 'ifscCode' in b) {
+      updateData.ifsc = optionalText(b.ifsc ?? b.ifsc_code ?? b.ifscCode);
+    }
+    if ('account_holder_name' in b || 'accountHolderName' in b) {
+      updateData.account_holder_name = optionalText(
+        b.account_holder_name ?? b.accountHolderName,
+      );
+    }
+  }
+
+  return {};
+}
+
 function getUploadedPdf(req: AuthenticatedRequest): Express.Multer.File | undefined {
   const raw = req.files;
   if (!raw || Array.isArray(raw)) return undefined;
@@ -382,8 +440,15 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
   try {
     const user = req.user!;
     const invoiceId = req.params.id;
-    const { status, rejection_note, note, tds_deducted, tds_amount, final_payable_amount } =
-      req.body;
+    const {
+      status,
+      rejection_note,
+      note,
+      tds_deducted,
+      tds_amount,
+      final_payable_amount,
+      amount,
+    } = req.body;
 
     if (!status) {
       res.status(400).json({ error: 'Status is required' });
@@ -409,10 +474,20 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
         return;
       }
 
-      const allowedStatuses = ['im_review', 'im_approved', 'rejected'];
+      const allowedStatuses = ['im_review', 'im_approved', 'rejected', 'audit_cleared'];
       if (!allowedStatuses.includes(status)) {
         res.status(403).json({ error: `IM can only set status to: ${allowedStatuses.join(', ')}` });
         return;
+      }
+
+      if (status === 'audit_cleared') {
+        if (invoice.status !== 'payer_rejected_im') {
+          res.status(400).json({
+            error:
+              'IM can only set audit cleared when the invoice was returned by payer for IM correction (payer_rejected_im)',
+          });
+          return;
+        }
       }
     } else if (user.role === 'accounts' || user.role === 'auditor') {
       const accountsAllowedStatuses = [
@@ -457,6 +532,26 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
           return;
         }
       }
+    } else if (user.role === 'creator') {
+      if (invoice.creator_id !== user.id) {
+        res.status(403).json({ error: 'You do not have access to this invoice' });
+        return;
+      }
+
+      const creatorAllowedStatuses = ['submitted'] as const;
+      if (!creatorAllowedStatuses.includes(status)) {
+        res.status(403).json({
+          error: `Creators can only set status to: ${creatorAllowedStatuses.join(', ')}`,
+        });
+        return;
+      }
+
+      if (invoice.status !== 'rejected') {
+        res.status(400).json({
+          error: 'Creators can only resubmit (set to submitted) when the invoice is rejected',
+        });
+        return;
+      }
     } else {
       res.status(403).json({ error: 'You do not have permission to change invoice status' });
       return;
@@ -479,10 +574,30 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
     }
 
     if (status === 'audit_cleared') {
-      updateData.tds_deducted = tds_deducted;
-      updateData.tds_amount = tds_amount;
-      updateData.final_payable_amount = final_payable_amount;
       updateData.rejection_note = null;
+      if (user.role === 'accounts' || user.role === 'auditor') {
+        updateData.tds_deducted = tds_deducted;
+        updateData.tds_amount = tds_amount;
+        updateData.final_payable_amount = final_payable_amount;
+      }
+      if (user.role === 'im' && typeof amount === 'number' && Number.isFinite(amount)) {
+        updateData.amount = amount;
+      }
+    }
+
+    if (
+      user.role === 'creator' &&
+      status === 'submitted' &&
+      invoice.status === 'rejected' &&
+      invoice.creator_id === user.id
+    ) {
+      updateData.rejection_note = null;
+      const body = req.body as Record<string, unknown>;
+      const fieldErr = applyCreatorResubmitFieldUpdates(body, updateData);
+      if (fieldErr.error) {
+        res.status(400).json({ error: fieldErr.error });
+        return;
+      }
     }
 
     const { data: updated, error: updateError } = await supabaseAdmin
@@ -499,6 +614,7 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
 
     // Build audit action text
     const actionMap: Record<string, string> = {
+      submitted: 'Resubmitted after rejection',
       im_review: 'Marked as IM Review',
       im_approved: 'IM Approved',
       rejected: 'Rejected',
