@@ -382,7 +382,8 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
   try {
     const user = req.user!;
     const invoiceId = req.params.id;
-    const { status, rejection_note, note } = req.body;
+    const { status, rejection_note, note, tds_deducted, tds_amount, final_payable_amount } =
+      req.body;
 
     if (!status) {
       res.status(400).json({ error: 'Status is required' });
@@ -450,6 +451,12 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
 
     if ((status === 'rejected' || status === 'audit_rejected') && rejection_note) {
       updateData.rejection_note = rejection_note;
+    }
+
+    if (status === 'audit_cleared') {
+      updateData.tds_deducted = tds_deducted;
+      updateData.tds_amount = tds_amount;
+      updateData.final_payable_amount = final_payable_amount;
     }
 
     const { data: updated, error: updateError } = await supabaseAdmin
