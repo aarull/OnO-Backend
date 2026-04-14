@@ -624,6 +624,39 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
       updated_at: new Date().toISOString(),
     };
 
+    // If a new base amount is provided, always recompute derived accounting fields
+    // server-side to avoid stale/incorrect totals.
+    if ('amount' in (req.body as Record<string, unknown>)) {
+      const nextAmount = parseAmount((req.body as Record<string, unknown>).amount);
+      if (nextAmount == null) {
+        res.status(400).json({ error: 'Invalid amount' });
+        return;
+      }
+
+      updateData.amount = nextAmount;
+
+      const tdsEnabled =
+        typeof tds_deducted === 'boolean'
+          ? tds_deducted
+          : (invoice as any).tds_deducted === true;
+
+      // Prefer a persisted explicit gst_amount if present; otherwise infer from boolean gst.
+      const existingGstAmountRaw = (invoice as any).gst_amount;
+      const existingGstAmount =
+        typeof existingGstAmountRaw === 'number' && Number.isFinite(existingGstAmountRaw)
+          ? existingGstAmountRaw
+          : null;
+
+      const gstEnabled = (invoice as any).gst === true;
+      const gstAmount = existingGstAmount ?? (gstEnabled ? nextAmount * 0.18 : 0);
+
+      const computedTdsAmount = tdsEnabled ? nextAmount * 0.01 : 0;
+      const computedFinalPayable = nextAmount + gstAmount - computedTdsAmount;
+
+      updateData.tds_amount = computedTdsAmount;
+      updateData.final_payable_amount = computedFinalPayable;
+    }
+
     if (
       (status === 'rejected' ||
         status === 'audit_rejected' ||
@@ -638,8 +671,12 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
       updateData.rejection_note = null;
       if (user.role === 'accounts' || user.role === 'auditor') {
         updateData.tds_deducted = tds_deducted;
-        updateData.tds_amount = tds_amount;
-        updateData.final_payable_amount = final_payable_amount;
+        // Keep accepting these fields for backward compatibility, but if `amount` was provided
+        // the computed values above win (accounting accuracy).
+        if (!('amount' in (req.body as Record<string, unknown>))) {
+          updateData.tds_amount = tds_amount;
+          updateData.final_payable_amount = final_payable_amount;
+        }
       }
       if (user.role === 'im' && typeof amount === 'number' && Number.isFinite(amount)) {
         updateData.amount = amount;
