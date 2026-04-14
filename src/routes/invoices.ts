@@ -16,7 +16,7 @@ type InvoiceRow = {
 };
 
 function canAccessInvoice(user: UserProfile, invoice: InvoiceRow): boolean {
-  if (user.role === 'accounts') return true;
+  if (user.role === 'accounts' || user.role === 'auditor') return true;
   if (user.role === 'creator' && invoice.creator_id === user.id) return true;
   if (
     user.role === 'im' &&
@@ -414,7 +414,7 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
         res.status(403).json({ error: `IM can only set status to: ${allowedStatuses.join(', ')}` });
         return;
       }
-    } else if (user.role === 'accounts') {
+    } else if (user.role === 'accounts' || user.role === 'auditor') {
       const accountsAllowedStatuses = [
         'audit_cleared',
         'audit_rejected',
@@ -424,7 +424,7 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
       ] as const;
       if (!accountsAllowedStatuses.includes(status)) {
         res.status(403).json({
-          error: `Accounts can only set status to: ${accountsAllowedStatuses.join(', ')}`,
+          error: `You can only set status to: ${accountsAllowedStatuses.join(', ')}`,
         });
         return;
       }
@@ -447,9 +447,12 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
           return;
         }
       } else if (status === 'audit_cleared' || status === 'audit_rejected') {
-        if (invoice.status !== 'im_approved') {
+        const canAudit =
+          invoice.status === 'im_approved' || invoice.status === 'payer_rejected_audit';
+        if (!canAudit) {
           res.status(400).json({
-            error: 'Audit actions are only allowed after IM approval',
+            error:
+              'Audit clear or reject is only allowed when the invoice is IM-approved or returned by payer audit (payer_rejected_audit)',
           });
           return;
         }
@@ -479,6 +482,7 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
       updateData.tds_deducted = tds_deducted;
       updateData.tds_amount = tds_amount;
       updateData.final_payable_amount = final_payable_amount;
+      updateData.rejection_note = null;
     }
 
     const { data: updated, error: updateError } = await supabaseAdmin

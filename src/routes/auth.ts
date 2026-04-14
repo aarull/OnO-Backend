@@ -14,7 +14,7 @@ router.post('/signup', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'Name, email, password, and role are required' });
     return;
   }
-  if (!['creator', 'im', 'accounts'].includes(role)) {
+  if (!['creator', 'im', 'accounts', 'auditor'].includes(role)) {
     res.status(400).json({ error: 'Invalid role' });
     return;
   }
