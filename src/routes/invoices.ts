@@ -108,6 +108,31 @@ function parseGst(v: unknown): boolean {
   return false;
 }
 
+async function fetchInvoiceByIdOrNumber(identifier: string): Promise<{
+  invoice: any | null;
+  error: { message: string } | null;
+}> {
+  // 1) Try UUID/primary key match
+  const first = await supabaseAdmin.from('invoices').select('*').eq('id', identifier).maybeSingle();
+  if (first.data) return { invoice: first.data, error: null };
+  if (first.error && first.error.code !== 'PGRST116') {
+    return { invoice: null, error: { message: first.error.message } };
+  }
+
+  // 2) Fallback to invoice_number match
+  const second = await supabaseAdmin
+    .from('invoices')
+    .select('*')
+    .eq('invoice_number', identifier)
+    .maybeSingle();
+  if (second.data) return { invoice: second.data, error: null };
+  if (second.error && second.error.code !== 'PGRST116') {
+    return { invoice: null, error: { message: second.error.message } };
+  }
+
+  return { invoice: null, error: null };
+}
+
 /** Applies optional invoice field updates from the body when a creator resubmits after rejection. */
 function applyCreatorResubmitFieldUpdates(
   body: Record<string, unknown>,
@@ -210,7 +235,41 @@ router.get('/', async (req: AuthenticatedRequest, res: Response) => {
       return;
     }
 
-    res.json(data);
+    const uuidLike = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const normalized = (data ?? []).map((row: any) => {
+      if (!row || typeof row !== 'object') return row;
+
+      // Expected new shape: { id: uuid, invoice_number: 'INV-YYYY-NNNN', ... }
+      if (typeof row.invoice_number === 'string' && uuidLike.test(String(row.id))) {
+        return row;
+      }
+
+      // Back-compat for older/alternate shapes:
+      // - id is display invoice number (INV-...), uuid lives in `uuid` or `invoice_id`
+      // - OR id is uuid, display lives in `invoice_number` already
+      const candidateUuid =
+        typeof row.uuid === 'string'
+          ? row.uuid
+          : typeof row.invoice_id === 'string'
+            ? row.invoice_id
+            : typeof row.invoice_uuid === 'string'
+              ? row.invoice_uuid
+              : null;
+
+      if (typeof row.id === 'string' && /^INV-\d{4}-\d{4,}$/.test(row.id) && candidateUuid) {
+        return {
+          ...row,
+          id: candidateUuid,
+          invoice_number: row.id,
+        };
+      }
+
+      // If we have a uuid id but no invoice_number column, expose the existing `id` as-is
+      // and leave invoice_number undefined (caller can handle it).
+      return row;
+    });
+
+    res.json(normalized);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch invoices' });
   }
@@ -275,24 +334,24 @@ router.get('/:id', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
 
-    const { data, error } = await supabaseAdmin
-      .from('invoices')
-      .select('*')
-      .eq('id', req.params.id)
-      .single();
+    const { invoice, error } = await fetchInvoiceByIdOrNumber(String(req.params.id));
+    if (error) {
+      res.status(500).json({ error: error.message });
+      return;
+    }
 
-    if (error || !data) {
+    if (!invoice) {
       res.status(404).json({ error: 'Invoice not found' });
       return;
     }
 
-    const invoice = data as InvoiceRow;
-    if (!canAccessInvoice(user, invoice)) {
+    const row = invoice as InvoiceRow;
+    if (!canAccessInvoice(user, row)) {
       res.status(403).json({ error: 'You do not have access to this invoice' });
       return;
     }
 
-    res.json(data);
+    res.json(invoice);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch invoice' });
   }
@@ -439,7 +498,7 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
 router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
-    const invoiceId = req.params.id;
+    const invoiceIdentifier = String(req.params.id);
     const {
       status,
       rejection_note,
@@ -456,16 +515,18 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
     }
 
     // Fetch current invoice
-    const { data: invoice, error: fetchError } = await supabaseAdmin
-      .from('invoices')
-      .select('*')
-      .eq('id', invoiceId)
-      .single();
+    const { invoice, error: fetchError } = await fetchInvoiceByIdOrNumber(invoiceIdentifier);
+    if (fetchError) {
+      res.status(500).json({ error: fetchError.message });
+      return;
+    }
 
-    if (fetchError || !invoice) {
+    if (!invoice) {
       res.status(404).json({ error: 'Invoice not found' });
       return;
     }
+
+    const invoiceId = String((invoice as any).id);
 
     // Role-based status transition checks
     if (user.role === 'im') {
@@ -642,7 +703,7 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
 router.patch('/:id/reminder', async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
-    const invoiceId = req.params.id;
+    const invoiceIdentifier = String(req.params.id);
 
     if (user.role !== 'creator') {
       res.status(403).json({ error: 'Only creators can send reminders' });
@@ -650,17 +711,18 @@ router.patch('/:id/reminder', async (req: AuthenticatedRequest, res: Response) =
     }
 
     // Verify the invoice exists and belongs to the creator
-    const { data: invoice, error: fetchError } = await supabaseAdmin
-      .from('invoices')
-      .select('*')
-      .eq('id', invoiceId)
-      .eq('creator_id', user.id)
-      .single();
+    const { invoice, error: fetchError } = await fetchInvoiceByIdOrNumber(invoiceIdentifier);
+    if (fetchError) {
+      res.status(500).json({ error: fetchError.message });
+      return;
+    }
 
-    if (fetchError || !invoice) {
+    if (!invoice || invoice.creator_id !== user.id) {
       res.status(404).json({ error: 'Invoice not found or not yours' });
       return;
     }
+
+    const invoiceId = String((invoice as any).id);
 
     // Check last reminder via audit_log
     const { data: lastReminder } = await supabaseAdmin
