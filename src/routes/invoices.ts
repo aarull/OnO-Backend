@@ -415,7 +415,13 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
         return;
       }
     } else if (user.role === 'accounts') {
-      const accountsAllowedStatuses = ['audit_cleared', 'audit_rejected', 'released'] as const;
+      const accountsAllowedStatuses = [
+        'audit_cleared',
+        'audit_rejected',
+        'released',
+        'payer_rejected_audit',
+        'payer_rejected_im',
+      ] as const;
       if (!accountsAllowedStatuses.includes(status)) {
         res.status(403).json({
           error: `Accounts can only set status to: ${accountsAllowedStatuses.join(', ')}`,
@@ -423,11 +429,21 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
         return;
       }
 
-      if (status === 'released') {
+      if (
+        status === 'released' ||
+        status === 'payer_rejected_audit' ||
+        status === 'payer_rejected_im'
+      ) {
         if (invoice.status !== 'audit_cleared') {
-          res.status(400).json({
-            error: 'Can only release invoices that are audit cleared',
-          });
+          if (status === 'released') {
+            res.status(400).json({
+              error: 'Can only release invoices that are audit cleared',
+            });
+          } else {
+            res.status(400).json({
+              error: 'Payer rejection is only allowed when the invoice is audit cleared',
+            });
+          }
           return;
         }
       } else if (status === 'audit_cleared' || status === 'audit_rejected') {
@@ -449,7 +465,13 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
       updated_at: new Date().toISOString(),
     };
 
-    if ((status === 'rejected' || status === 'audit_rejected') && rejection_note) {
+    if (
+      (status === 'rejected' ||
+        status === 'audit_rejected' ||
+        status === 'payer_rejected_audit' ||
+        status === 'payer_rejected_im') &&
+      rejection_note
+    ) {
       updateData.rejection_note = rejection_note;
     }
 
@@ -479,6 +501,8 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
       audit_cleared: 'Audit Cleared',
       audit_rejected: 'Audit Rejected',
       released: 'Payment Released',
+      payer_rejected_audit: 'Payer Rejected (Audit)',
+      payer_rejected_im: 'Payer Rejected (IM)',
     };
 
     await supabaseAdmin.from('audit_log').insert({
