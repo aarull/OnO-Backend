@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import multer from 'multer';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { AuthenticatedRequest, UserProfile } from '../middleware/auth.js';
+import { appendInvoiceToSheet } from '../services/googleSheets.js';
 
 const router = Router();
 
@@ -731,6 +732,16 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
       done_by: user.name,
       note: rejection_note || note || null,
     });
+
+    if (status === 'audit_cleared' && updated) {
+      try {
+        void appendInvoiceToSheet(updated as Record<string, unknown>).catch((err: unknown) => {
+          console.error('[googleSheets] appendInvoiceToSheet failed:', err);
+        });
+      } catch (err) {
+        console.error('[googleSheets] appendInvoiceToSheet failed (sync):', err);
+      }
+    }
 
     res.json(updated);
   } catch (err) {
