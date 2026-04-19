@@ -738,8 +738,7 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
   }
 });
 
-// PATCH /api/invoices/:id/release - Release (partial/full) payment (accounts/auditor only)
-router.patch('/:id/release', async (req: AuthenticatedRequest, res: Response) => {
+async function releasePaymentController(req: AuthenticatedRequest, res: Response) {
   try {
     const user = req.user!;
     if (user.role !== 'accounts' && user.role !== 'auditor') {
@@ -849,7 +848,13 @@ router.patch('/:id/release', async (req: AuthenticatedRequest, res: Response) =>
   } catch (err) {
     res.status(500).json({ error: 'Failed to release payment' });
   }
-});
+}
+
+// PATCH /api/invoices/:id/release - Release (partial/full) payment (accounts/auditor only)
+router.patch('/:id/release', releasePaymentController);
+
+// POST /api/invoices/:id/release - Release (partial/full) payment (accounts/auditor only)
+router.post('/:id/release', releasePaymentController);
 
 // PATCH /api/invoices/:id/reminder - Send reminder (creator only)
 router.patch('/:id/reminder', async (req: AuthenticatedRequest, res: Response) => {
