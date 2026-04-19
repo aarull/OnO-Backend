@@ -109,6 +109,12 @@ function parseGst(v: unknown): boolean {
   return false;
 }
 
+function parseNonNegativeNumber(v: unknown): number {
+  if (v == null || v === '') return 0;
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
 async function fetchInvoiceByIdOrNumber(identifier: string): Promise<{
   invoice: any | null;
   error: { message: string } | null;
@@ -386,6 +392,11 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
     const pan_number = optionalText(body.panNumber ?? body.pan_number);
     const gst_number = optionalText(body.gstNumber ?? body.gst_number);
     const gst = parseGst(body.gst);
+    const commission_rate = parseNonNegativeNumber(body.commission_rate ?? body.commissionRate);
+    const commission_amount = Math.max(
+      0,
+      parseAmount(body.commission_amount ?? body.commissionAmount) ?? 0,
+    );
 
     if (!campaign || amount == null || !assigned_im) {
       res.status(400).json({
@@ -456,6 +467,8 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
         account_holder_name: account_holder_name ?? null,
         pan_number: pan_number ?? null,
         gst_number: gst_number ?? null,
+        commission_rate,
+        commission_amount,
         invoice_file_path: invoice_file_path,
         invoice_file_url: invoice_file_path,
         status: 'submitted',
