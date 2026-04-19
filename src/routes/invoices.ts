@@ -555,6 +555,7 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
         'audit_cleared',
         'audit_rejected',
         'released',
+        'partially_paid',
         'payer_rejected_audit',
         'payer_rejected_im',
       ] as const;
@@ -570,10 +571,11 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
         status === 'payer_rejected_audit' ||
         status === 'payer_rejected_im'
       ) {
-        if (invoice.status !== 'audit_cleared') {
+        const canReleaseFrom = invoice.status === 'audit_cleared' || invoice.status === 'partially_paid';
+        if (status === 'released' ? !canReleaseFrom : invoice.status !== 'audit_cleared') {
           if (status === 'released') {
             res.status(400).json({
-              error: 'Can only release invoices that are audit cleared',
+              error: 'Can only release invoices that are audit cleared or partially paid',
             });
           } else {
             res.status(400).json({
@@ -733,6 +735,119 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
     res.json(updated);
   } catch (err) {
     res.status(500).json({ error: 'Failed to update invoice status' });
+  }
+});
+
+// PATCH /api/invoices/:id/release - Release (partial/full) payment (accounts/auditor only)
+router.patch('/:id/release', async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    if (user.role !== 'accounts' && user.role !== 'auditor') {
+      res.status(403).json({ error: 'You do not have permission to release payments' });
+      return;
+    }
+
+    const invoiceIdentifier = String(req.params.id);
+    const body = req.body as Record<string, unknown>;
+    const amountReleased = parseAmount(body.amount_released ?? body.amountReleased);
+    const reason = optionalText(body.reason);
+    const note = optionalText(body.note);
+
+    if (amountReleased == null || amountReleased <= 0) {
+      res.status(400).json({ error: 'amount_released must be a positive number' });
+      return;
+    }
+    if (!reason) {
+      res.status(400).json({ error: 'reason is required' });
+      return;
+    }
+
+    const { invoice, error: fetchError } = await fetchInvoiceByIdOrNumber(invoiceIdentifier);
+    if (fetchError) {
+      res.status(500).json({ error: fetchError.message });
+      return;
+    }
+    if (!invoice) {
+      res.status(404).json({ error: 'Invoice not found' });
+      return;
+    }
+
+    const invoiceId = String((invoice as any).id);
+    const currentStatus = String((invoice as any).status ?? '');
+    if (currentStatus !== 'audit_cleared' && currentStatus !== 'partially_paid') {
+      res.status(400).json({
+        error: 'Can only release payments for invoices that are audit cleared or partially paid',
+      });
+      return;
+    }
+
+    const finalPayableRaw = (invoice as any).final_payable_amount;
+    const finalPayable =
+      typeof finalPayableRaw === 'number'
+        ? finalPayableRaw
+        : typeof finalPayableRaw === 'string'
+          ? Number(finalPayableRaw)
+          : NaN;
+    if (!Number.isFinite(finalPayable) || finalPayable <= 0) {
+      res.status(400).json({ error: 'final_payable_amount is missing or invalid on this invoice' });
+      return;
+    }
+
+    const amountPaidRaw = (invoice as any).amount_paid;
+    const currentPaid =
+      typeof amountPaidRaw === 'number'
+        ? amountPaidRaw
+        : typeof amountPaidRaw === 'string'
+          ? Number(amountPaidRaw)
+          : 0;
+    if (!Number.isFinite(currentPaid) || currentPaid < 0) {
+      res.status(400).json({ error: 'amount_paid is invalid on this invoice' });
+      return;
+    }
+
+    const nextPaid = currentPaid + amountReleased;
+
+    const history = Array.isArray((invoice as any).payment_history)
+      ? ((invoice as any).payment_history as unknown[])
+      : [];
+    const entry = {
+      date: new Date().toISOString(),
+      amount: amountReleased,
+      reason,
+      note: note ?? null,
+      sender: 'payer' as const,
+    };
+    const nextHistory = [...history, entry];
+
+    const nextStatus = nextPaid >= finalPayable ? 'released' : 'partially_paid';
+
+    const { data: updated, error: updateError } = await supabaseAdmin
+      .from('invoices')
+      .update({
+        amount_paid: nextPaid,
+        payment_history: nextHistory,
+        status: nextStatus,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', invoiceId)
+      .select()
+      .single();
+
+    if (updateError || !updated) {
+      res.status(500).json({ error: updateError?.message || 'Failed to update invoice' });
+      return;
+    }
+
+    await supabaseAdmin.from('audit_log').insert({
+      invoice_id: invoiceId,
+      action: nextStatus === 'released' ? 'Payment Released' : 'Partial Payment Released',
+      done_by: user.name,
+      note: `${reason}${note ? ` — ${note}` : ''}`,
+    });
+
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to release payment' });
   }
 });
 
