@@ -1,4 +1,5 @@
 import puppeteer from 'puppeteer';
+import path from 'node:path';
 import { supabaseAdmin } from '../lib/supabase.js';
 
 const INVOICE_BUCKET = 'invoices';
@@ -247,9 +248,10 @@ export async function generateUploadAndPersistInvoicePdf(
   const html = buildInvoiceHtml(invoice);
 
   const browser = await puppeteer.launch({
-    // Direct path confirmed from Render build logs
-    executablePath:
-      '/opt/render/.cache/puppeteer/chrome/linux-147.0.7727.57/chrome-linux64/chrome',
+    executablePath: path.join(
+      process.cwd(),
+      '.puppeteer-cache/chrome/linux-147.0.7727.57/chrome-linux64/chrome',
+    ),
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   });
