@@ -9,6 +9,7 @@ import healthRouter from './routes/health.js';
 import invoicesRouter from './routes/invoices.js';
 import auditRouter from './routes/audit.js';
 import profilesRouter from './routes/profiles.js';
+import creatorsRouter from './routes/creators.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -23,6 +24,7 @@ app.use('/api/health', healthRouter);
 app.use('/api/invoices', authMiddleware, invoicesRouter);
 app.use('/api/audit', authMiddleware, auditRouter);
 app.use('/api/profiles', profilesRouter);
+app.use('/api/creators', authMiddleware, creatorsRouter);
 
 // Start server
 app.listen(PORT, () => {

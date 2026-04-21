@@ -384,12 +384,21 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
     const campaign = optionalText(body.campaign);
     const amount = parseAmount(body.amount);
     const assigned_im = optionalText(body.assigned_im ?? body.assignedIm);
-    const account_no = optionalText(body.account_no ?? body.accountNo);
-    const ifsc = optionalText(body.ifsc);
-    const account_holder_name = optionalText(
-      body.accountHolderName ?? body.account_holder_name,
-    );
-    const pan_number = optionalText(body.panNumber ?? body.pan_number);
+    let account_no = optionalText(body.account_no ?? body.accountNo);
+    let ifsc = optionalText(body.ifsc ?? body.ifsc_code ?? body.ifscCode);
+    let account_holder_name = optionalText(body.accountHolderName ?? body.account_holder_name);
+    let pan_number = optionalText(body.panNumber ?? body.pan_number);
+
+    // Optional nested bank details payload (frontend autofill use case)
+    const bank = body.bank_details;
+    if (bank && typeof bank === 'object' && !Array.isArray(bank)) {
+      const b = bank as Record<string, unknown>;
+      account_no = account_no ?? optionalText(b.account_no ?? b.accountNo);
+      ifsc = ifsc ?? optionalText(b.ifsc ?? b.ifsc_code ?? b.ifscCode);
+      account_holder_name =
+        account_holder_name ?? optionalText(b.account_holder_name ?? b.accountHolderName);
+      pan_number = pan_number ?? optionalText(b.pan_number ?? b.panNumber);
+    }
     const gst_number = optionalText(body.gstNumber ?? body.gst_number);
     const gst = parseGst(body.gst);
     const commission_rate = parseNonNegativeNumber(body.commission_rate ?? body.commissionRate);
