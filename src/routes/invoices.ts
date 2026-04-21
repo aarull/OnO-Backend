@@ -3,6 +3,7 @@ import multer from 'multer';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { AuthenticatedRequest, UserProfile } from '../middleware/auth.js';
 import { appendInvoiceToSheet } from '../services/googleSheets.js';
+import { generateUploadAndPersistInvoicePdf } from '../services/invoicePdf.js';
 
 const router = Router();
 
@@ -502,6 +503,17 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
       action: 'Submitted',
       done_by: user.name,
     });
+
+    // Generate and store invoice PDF without blocking the response.
+    try {
+      void generateUploadAndPersistInvoicePdf(invoice as Record<string, unknown>).catch(
+        (err: unknown) => {
+          console.error('[invoicePdf] generate/upload failed:', err);
+        },
+      );
+    } catch (err) {
+      console.error('[invoicePdf] generate/upload failed (sync):', err);
+    }
 
     res.status(201).json(invoice);
   } catch (err) {
