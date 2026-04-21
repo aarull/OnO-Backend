@@ -232,15 +232,22 @@ function buildInvoiceHtml(invoice: Record<string, unknown>): string {
 
 export async function generateUploadAndPersistInvoicePdf(
   invoice: Record<string, unknown>,
-): Promise<{ pdf_url: string; storage_path: string }> {
-  const invoiceId = String(invoice.id ?? '');
+): Promise<{ invoice_file_url: string; storage_path: string }> {
+  const invoiceUuid = String(invoice.id ?? '');
+  const invoiceNumber = String(invoice.invoice_number ?? invoice.id ?? '');
   const creatorId = String(invoice.creator_id ?? 'unknown');
+
+  console.log('[invoicePdf] starting PDF generation', {
+    id: invoiceUuid,
+    invoice_number: invoiceNumber,
+    creator_id: creatorId,
+  });
 
   const html = buildInvoiceHtml(invoice);
 
   const browser = await puppeteer.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
   });
 
@@ -253,7 +260,8 @@ export async function generateUploadAndPersistInvoicePdf(
       margin: { top: '20px', bottom: '20px', left: '20px', right: '20px' },
     });
 
-    const storagePath = `${creatorId}/${invoiceId}.pdf`;
+    const fileName = invoiceNumber || invoiceUuid || 'invoice';
+    const storagePath = `${creatorId}/${fileName}.pdf`;
     const { error: uploadError } = await supabaseAdmin.storage
       .from(INVOICE_BUCKET)
       .upload(storagePath, pdfBuffer, {
@@ -274,15 +282,27 @@ export async function generateUploadAndPersistInvoicePdf(
       throw new Error('Failed to generate public URL for PDF');
     }
 
-    const { error: updateError } = await supabaseAdmin
+    // Update by UUID id (primary key); fallback to invoice_number for legacy calls.
+    const { error: updateError, data: updated } = await supabaseAdmin
       .from('invoices')
-      .update({ pdf_url: publicUrl })
-      .eq('id', invoiceId);
-    if (updateError) {
-      throw new Error(updateError.message);
+      .update({ invoice_file_url: publicUrl })
+      .eq('id', invoiceUuid)
+      .select('id')
+      .maybeSingle();
+    if (updateError) throw new Error(updateError.message);
+
+    if (!updated && invoiceNumber) {
+      const { error: fallbackError } = await supabaseAdmin
+        .from('invoices')
+        .update({ invoice_file_url: publicUrl })
+        .eq('invoice_number', invoiceNumber);
+      if (fallbackError) throw new Error(fallbackError.message);
     }
 
-    return { pdf_url: publicUrl, storage_path: storagePath };
+    return { invoice_file_url: publicUrl, storage_path: storagePath };
+  } catch (err) {
+    console.error('[invoicePdf] PDF generation failed', err);
+    throw err;
   } finally {
     await browser.close();
   }
