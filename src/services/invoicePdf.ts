@@ -237,6 +237,7 @@ export async function generateUploadAndPersistInvoicePdf(
   const invoiceNumber = String(invoice.invoice_number ?? invoice.id ?? '');
   const creatorId = String(invoice.creator_id ?? 'unknown');
 
+  console.log('PDF Generation Started for:', invoiceUuid);
   console.log('[invoicePdf] starting PDF generation', {
     id: invoiceUuid,
     invoice_number: invoiceNumber,
@@ -246,9 +247,11 @@ export async function generateUploadAndPersistInvoicePdf(
   const html = buildInvoiceHtml(invoice);
 
   const browser = await puppeteer.launch({
+    // Direct path confirmed from Render build logs
+    executablePath:
+      '/opt/render/.cache/puppeteer/chrome/linux-147.0.7727.57/chrome-linux64/chrome',
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
   });
 
   try {
@@ -259,6 +262,7 @@ export async function generateUploadAndPersistInvoicePdf(
       printBackground: true,
       margin: { top: '20px', bottom: '20px', left: '20px', right: '20px' },
     });
+    console.log('[invoicePdf] PDF generated', { bytes: pdfBuffer.length, id: invoiceUuid });
 
     const fileName = invoiceNumber || invoiceUuid || 'invoice';
     const storagePath = `${creatorId}/${fileName}.pdf`;
@@ -272,6 +276,7 @@ export async function generateUploadAndPersistInvoicePdf(
     if (uploadError) {
       throw new Error(uploadError.message);
     }
+    console.log('[invoicePdf] PDF uploaded to storage', { storagePath, id: invoiceUuid });
 
     const { data: publicData } = supabaseAdmin.storage
       .from(INVOICE_BUCKET)
@@ -290,6 +295,10 @@ export async function generateUploadAndPersistInvoicePdf(
       .select('id')
       .maybeSingle();
     if (updateError) throw new Error(updateError.message);
+    console.log('[invoicePdf] DB updated invoice_file_url', {
+      id: invoiceUuid,
+      matched_by: updated ? 'id' : 'none',
+    });
 
     if (!updated && invoiceNumber) {
       const { error: fallbackError } = await supabaseAdmin
@@ -297,11 +306,14 @@ export async function generateUploadAndPersistInvoicePdf(
         .update({ invoice_file_url: publicUrl })
         .eq('invoice_number', invoiceNumber);
       if (fallbackError) throw new Error(fallbackError.message);
+      console.log('[invoicePdf] DB updated invoice_file_url (fallback)', {
+        invoice_number: invoiceNumber,
+      });
     }
 
     return { invoice_file_url: publicUrl, storage_path: storagePath };
   } catch (err) {
-    console.error('[invoicePdf] PDF generation failed', err);
+    console.error('[invoicePdf] PDF generation failed (full error object):', err);
     throw err;
   } finally {
     await browser.close();
