@@ -94,7 +94,11 @@ const invoiceMultipartParser = pdfUpload.fields([
 function optionalText(v: unknown): string | null {
   if (v == null) return null;
   const s = String(v).trim();
-  return s === '' ? null : s;
+  if (s === '') return null;
+  // Frontends sometimes send null-ish values as strings (esp. multipart/form-data)
+  const lowered = s.toLowerCase();
+  if (lowered === 'null' || lowered === 'undefined') return null;
+  return s;
 }
 
 function parseAmount(v: unknown): number | null {
