@@ -42,19 +42,7 @@ function buildInvoiceHtml(invoice: Record<string, unknown>): string {
   const gstOn = invoice.gst === true;
   const gstAmount = gstOn ? base * 0.18 : 0;
 
-  const commissionRateRaw =
-    typeof invoice.commission_rate === 'number'
-      ? invoice.commission_rate
-      : Number(invoice.commission_rate);
-  const commissionRate = Number.isFinite(commissionRateRaw) ? commissionRateRaw : 0;
-
-  const commissionAmountRaw =
-    typeof invoice.commission_amount === 'number'
-      ? invoice.commission_amount
-      : Number(invoice.commission_amount);
-  const commissionAmount = Number.isFinite(commissionAmountRaw) ? commissionAmountRaw : 0;
-
-  const netAdjusted = base + gstAmount - commissionAmount;
+  const netAdjusted = base + gstAmount;
 
   const accountHolder = escapeHtml(String(invoice.account_holder_name ?? ''));
   const accountNumber = escapeHtml(String(invoice.account_no ?? ''));
@@ -209,10 +197,6 @@ function buildInvoiceHtml(invoice: Record<string, unknown>): string {
         <div class="total-row">
             <span>GST (18%)</span>
             <span>+₹${inr(gstAmount)}</span>
-        </div>
-        <div class="total-row">
-            <span>Agency Commission (${inr(commissionRate)}%)</span>
-            <span>-₹${inr(commissionAmount)}</span>
         </div>
         <div class="total-row net">
             <span>Net Payable</span>
