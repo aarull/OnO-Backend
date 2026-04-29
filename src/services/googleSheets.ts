@@ -82,6 +82,7 @@ export async function appendInvoiceToSheet(invoice: Record<string, unknown>): Pr
       : 'NA';
   const payeeName =
     invoice.account_holder_name != null ? String(invoice.account_holder_name) : '';
+  const imRemark = invoice.im_remark != null ? String(invoice.im_remark) : '';
 
   const baseAmount = num(invoice.amount);
   const tdsAmount = num(invoice.tds_amount);
@@ -105,7 +106,7 @@ export async function appendInvoiceToSheet(invoice: Record<string, unknown>): Pr
     netAmt,
     invoiceAmt,
     '',
-    '',
+    imRemark,
     '',
     totalToProcess,
   ];
