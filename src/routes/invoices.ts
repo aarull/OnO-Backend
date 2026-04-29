@@ -930,7 +930,9 @@ async function releasePaymentController(req: AuthenticatedRequest, res: Response
         amount_paid: nextPaid,
         payment_history: nextHistory,
         status: nextStatus,
-        last_payment_utr: utrNumber || null,
+        utr_number: utrNumber || null,
+        amount_paid_now: paymentAmount,
+        remaining_balance: remainingNet,
         updated_at: new Date().toISOString(),
       })
       .eq('id', invoiceId)
