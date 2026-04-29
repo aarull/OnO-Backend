@@ -1,8 +1,26 @@
 import { google, sheets_v4 } from 'googleapis';
 import { formatIstToDDMMYY, formatIstToMonthYear, getNow } from '../utils/dateUtils.js';
 
+export type ReleaseSheetRowParams = {
+  invoiceNumber: string;
+  /** Column P: remaining net amount after this payment (final_payable - cumulative paid after txn). */
+  remainingNet: number;
+  /** Column Q: amount paid in this transaction. */
+  paidNow: number;
+  /** Column R: UTR reference. */
+  utr: string;
+  /** Column S: payment date (already formatted, IST). */
+  paymentDateIst: string;
+};
+
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
-const APPEND_RANGE = 'Sheet1!A:O';
+function appendRangeAtoO(): string {
+  return `${sheetTabName()}!A:O`;
+}
+
+function sheetTabName(): string {
+  return process.env.GOOGLE_SHEET_TAB ?? 'Sheet1';
+}
 
 let sheetsClientPromise: Promise<sheets_v4.Sheets> | null = null;
 
@@ -101,11 +119,65 @@ export async function appendInvoiceToSheet(invoice: Record<string, unknown>): Pr
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: APPEND_RANGE,
+    range: appendRangeAtoO(),
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
     requestBody: {
       values: [row],
+    },
+  });
+}
+
+/**
+ * Finds the row where column C matches invoice_number and writes P–S (release payment).
+ * P: remaining net after this payment, Q: paid now, R: UTR, S: payment date (IST string).
+ */
+export async function updateReleasePaymentColumnsInSheet(
+  params: ReleaseSheetRowParams,
+): Promise<void> {
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+  if (!spreadsheetId) {
+    console.error('[googleSheets] GOOGLE_SHEET_ID is not set; skipping release columns update');
+    return;
+  }
+
+  const tab = sheetTabName();
+  const sheets = await getSheetsClient();
+
+  const { data } = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${tab}!C:C`,
+  });
+
+  const rows = data.values ?? [];
+  const target = params.invoiceNumber.trim();
+  let rowNumber = -1;
+
+  for (let i = 0; i < rows.length; i++) {
+    const cell = rows[i]?.[0];
+    if (cell != null && String(cell).trim() === target) {
+      rowNumber = i + 1;
+      break;
+    }
+  }
+
+  if (rowNumber < 1) {
+    throw new Error(`[googleSheets] No sheet row found for invoice_number ${target}`);
+  }
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${tab}!P${rowNumber}:S${rowNumber}`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: {
+      values: [
+        [
+          params.remainingNet,
+          params.paidNow,
+          params.utr,
+          params.paymentDateIst,
+        ],
+      ],
     },
   });
 }

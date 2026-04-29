@@ -2,9 +2,9 @@ import { Router, Response } from 'express';
 import multer from 'multer';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { AuthenticatedRequest, UserProfile } from '../middleware/auth.js';
-import { appendInvoiceToSheet } from '../services/googleSheets.js';
+import { appendInvoiceToSheet, updateReleasePaymentColumnsInSheet } from '../services/googleSheets.js';
 import { generateUploadAndPersistInvoicePdf } from '../services/invoicePdf.js';
-import { getIstYear } from '../utils/dateUtils.js';
+import { formatIstToDDMMYY, getIstYear, getNow } from '../utils/dateUtils.js';
 
 const router = Router();
 
@@ -848,16 +848,17 @@ async function releasePaymentController(req: AuthenticatedRequest, res: Response
 
     const invoiceIdentifier = String(req.params.id);
     const body = req.body as Record<string, unknown>;
-    const amountReleased = parseAmount(body.amount_released ?? body.amountReleased);
-    const reason = optionalText(body.reason);
+    const paymentAmount = parseAmount(
+      body.paymentAmount ?? body.payment_amount ?? body.amount_released ?? body.amountReleased,
+    );
+    const utrNumber = optionalText(body.utrNumber ?? body.utr_number ?? body.utr) ?? '';
+    const reason = optionalText(body.reason) ?? 'Payment release';
     const note = optionalText(body.note);
 
-    if (amountReleased == null || amountReleased <= 0) {
-      res.status(400).json({ error: 'amount_released must be a positive number' });
-      return;
-    }
-    if (!reason) {
-      res.status(400).json({ error: 'reason is required' });
+    if (paymentAmount == null || paymentAmount <= 0) {
+      res.status(400).json({
+        error: 'payment_amount must be a positive number (paymentAmount or amount_released)',
+      });
       return;
     }
 
@@ -904,14 +905,15 @@ async function releasePaymentController(req: AuthenticatedRequest, res: Response
       return;
     }
 
-    const nextPaid = currentPaid + amountReleased;
+    const nextPaid = currentPaid + paymentAmount;
 
     const history = Array.isArray((invoice as any).payment_history)
       ? ((invoice as any).payment_history as unknown[])
       : [];
     const entry = {
       date: new Date().toISOString(),
-      amount: amountReleased,
+      amount: paymentAmount,
+      utr: utrNumber || null,
       reason,
       note: note ?? null,
       sender: 'payer' as const,
@@ -920,12 +922,15 @@ async function releasePaymentController(req: AuthenticatedRequest, res: Response
 
     const nextStatus = nextPaid >= finalPayable ? 'released' : 'partially_paid';
 
+    const remainingNet = Math.max(0, finalPayable - nextPaid);
+
     const { data: updated, error: updateError } = await supabaseAdmin
       .from('invoices')
       .update({
         amount_paid: nextPaid,
         payment_history: nextHistory,
         status: nextStatus,
+        last_payment_utr: utrNumber || null,
         updated_at: new Date().toISOString(),
       })
       .eq('id', invoiceId)
@@ -941,7 +946,20 @@ async function releasePaymentController(req: AuthenticatedRequest, res: Response
       invoice_id: invoiceId,
       action: nextStatus === 'released' ? 'Payment Released' : 'Partial Payment Released',
       done_by: user.name,
-      note: `${reason}${note ? ` — ${note}` : ''}`,
+      note: `${reason}${utrNumber ? ` | UTR: ${utrNumber}` : ''}${note ? ` — ${note}` : ''}`,
+    });
+
+    const sheetInvoiceNo = String(
+      (updated as any).invoice_number ?? (updated as any).id ?? invoiceIdentifier,
+    );
+    void updateReleasePaymentColumnsInSheet({
+      invoiceNumber: sheetInvoiceNo,
+      remainingNet,
+      paidNow: paymentAmount,
+      utr: utrNumber,
+      paymentDateIst: formatIstToDDMMYY(getNow()),
+    }).catch((err: unknown) => {
+      console.error('[googleSheets] updateReleasePaymentColumnsInSheet failed:', err);
     });
 
     res.json(updated);
