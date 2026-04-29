@@ -63,7 +63,15 @@ export async function appendInvoiceToSheet(invoice: Record<string, unknown>): Pr
   const imRemark = invoice.im_remark != null ? String(invoice.im_remark) : '';
 
   const baseAmount = num(invoice.amount);
-  const tdsAmount = num(invoice.tds_amount);
+  const tdsPercentageRaw = (invoice as any).tds_percentage ?? (invoice as any).tdsPercentage;
+  const tdsPercentage =
+    typeof tdsPercentageRaw === 'number'
+      ? tdsPercentageRaw
+      : typeof tdsPercentageRaw === 'string'
+        ? Number(tdsPercentageRaw)
+        : 0;
+  const safeTdsPercentage = Number.isFinite(tdsPercentage) ? tdsPercentage : 0;
+  const tdsAmount = baseAmount * (safeTdsPercentage / 100);
   const afterTds = baseAmount - tdsAmount;
   const gstOn = invoice.gst === true;
   const gstAmount = gstOn ? baseAmount * 0.18 : 0;

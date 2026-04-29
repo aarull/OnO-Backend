@@ -537,6 +537,7 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
       rejection_note,
       note,
       im_remark,
+      tds_percentage,
       tds_deducted,
       tds_amount,
       final_payable_amount,
@@ -666,21 +667,67 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
       updateData.im_remark = null;
     }
 
-    // If a new base amount is provided, always recompute derived accounting fields
+    // If base amount or TDS percentage changes, always recompute derived accounting fields
     // server-side to avoid stale/incorrect totals.
-    if ('amount' in (req.body as Record<string, unknown>)) {
-      const nextAmount = parseAmount((req.body as Record<string, unknown>).amount);
+    const bodyObj = req.body as Record<string, unknown>;
+    const hasAmount = 'amount' in bodyObj;
+    const hasTdsPercentage = 'tds_percentage' in bodyObj || 'tdsPercentage' in bodyObj;
+
+    let nextAmount: number | null = null;
+    if (hasAmount) {
+      nextAmount = parseAmount(bodyObj.amount);
       if (nextAmount == null) {
         res.status(400).json({ error: 'Invalid amount' });
         return;
       }
-
       updateData.amount = nextAmount;
+    }
 
-      const tdsEnabled =
-        typeof tds_deducted === 'boolean'
-          ? tds_deducted
-          : (invoice as any).tds_deducted === true;
+    const rawTdsPercentage =
+      typeof tds_percentage === 'number'
+        ? tds_percentage
+        : typeof (bodyObj as any).tdsPercentage === 'number'
+          ? (bodyObj as any).tdsPercentage
+          : tds_percentage;
+
+    const parsedTdsPercentage =
+      typeof rawTdsPercentage === 'number' ? rawTdsPercentage : Number(rawTdsPercentage);
+    const allowedTdsPercentages = new Set([0, 1, 2, 10]);
+    const existingTdsPercRaw = (invoice as any).tds_percentage;
+    const existingTdsPerc =
+      typeof existingTdsPercRaw === 'number'
+        ? existingTdsPercRaw
+        : typeof existingTdsPercRaw === 'string'
+          ? Number(existingTdsPercRaw)
+          : NaN;
+
+    const fallbackPercFromBoolean =
+      (typeof tds_deducted === 'boolean'
+        ? tds_deducted
+        : (invoice as any).tds_deducted === true)
+        ? 1
+        : 0;
+
+    const nextTdsPercentage = Number.isFinite(parsedTdsPercentage)
+      ? parsedTdsPercentage
+      : Number.isFinite(existingTdsPerc)
+        ? existingTdsPerc
+        : fallbackPercFromBoolean;
+
+    if (hasTdsPercentage && !allowedTdsPercentages.has(nextTdsPercentage)) {
+      res.status(400).json({ error: 'tds_percentage must be one of: 0, 1, 2, 10' });
+      return;
+    }
+
+    if (hasTdsPercentage) {
+      updateData.tds_percentage = nextTdsPercentage;
+    }
+
+    if (hasAmount || hasTdsPercentage) {
+      const baseAmountRaw = hasAmount ? nextAmount : (typeof (invoice as any).amount === 'number'
+        ? (invoice as any).amount
+        : Number((invoice as any).amount));
+      const baseAmount = Number.isFinite(baseAmountRaw as number) ? (baseAmountRaw as number) : 0;
 
       // Prefer a persisted explicit gst_amount if present; otherwise infer from boolean gst.
       const existingGstAmountRaw = (invoice as any).gst_amount;
@@ -690,10 +737,10 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
           : null;
 
       const gstEnabled = (invoice as any).gst === true;
-      const gstAmount = existingGstAmount ?? (gstEnabled ? nextAmount * 0.18 : 0);
+      const gstAmount = existingGstAmount ?? (gstEnabled ? baseAmount * 0.18 : 0);
 
-      const computedTdsAmount = tdsEnabled ? nextAmount * 0.01 : 0;
-      const computedFinalPayable = nextAmount + gstAmount - computedTdsAmount;
+      const computedTdsAmount = baseAmount * (nextTdsPercentage / 100);
+      const computedFinalPayable = baseAmount + gstAmount - computedTdsAmount;
 
       updateData.tds_amount = computedTdsAmount;
       updateData.final_payable_amount = computedFinalPayable;
@@ -713,9 +760,12 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
       updateData.rejection_note = null;
       if (user.role === 'accounts' || user.role === 'auditor') {
         updateData.tds_deducted = tds_deducted;
+        if (hasTdsPercentage) {
+          updateData.tds_percentage = nextTdsPercentage;
+        }
         // Keep accepting these fields for backward compatibility, but if `amount` was provided
         // the computed values above win (accounting accuracy).
-        if (!('amount' in (req.body as Record<string, unknown>))) {
+        if (!(hasAmount || hasTdsPercentage)) {
           updateData.tds_amount = tds_amount;
           updateData.final_payable_amount = final_payable_amount;
         }
