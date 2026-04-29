@@ -1,34 +1,10 @@
 import { google, sheets_v4 } from 'googleapis';
+import { formatIstToDDMMYY, formatIstToMonthYear, getNow } from '../utils/dateUtils.js';
 
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 const APPEND_RANGE = 'Sheet1!A:O';
 
 let sheetsClientPromise: Promise<sheets_v4.Sheets> | null = null;
-
-function formatDateDDMMYY(d: Date): string {
-  const dd = String(d.getDate()).padStart(2, '0');
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const yy = String(d.getFullYear()).slice(-2);
-  return `${dd}-${mm}-${yy}`;
-}
-
-function formatMonthMMMYY(d: Date): string {
-  const months = [
-    'Jan',
-    'Feb',
-    'Mar',
-    'Apr',
-    'May',
-    'Jun',
-    'Jul',
-    'Aug',
-    'Sep',
-    'Oct',
-    'Nov',
-    'Dec',
-  ];
-  return `${months[d.getMonth()]}-${String(d.getFullYear()).slice(-2)}`;
-}
 
 function num(v: unknown): number {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -73,7 +49,7 @@ export async function appendInvoiceToSheet(invoice: Record<string, unknown>): Pr
     return;
   }
 
-  const now = new Date();
+  const now = getNow();
 
   const invoiceNumber = String(invoice.invoice_number ?? invoice.id ?? '');
   const gstin =
@@ -94,8 +70,8 @@ export async function appendInvoiceToSheet(invoice: Record<string, unknown>): Pr
   const totalToProcess = num(invoice.final_payable_amount);
 
   const row: (string | number)[] = [
-    formatDateDDMMYY(now),
-    formatMonthMMMYY(now),
+    formatIstToDDMMYY(now),
+    formatIstToMonthYear(now),
     invoiceNumber,
     gstin,
     payeeName,

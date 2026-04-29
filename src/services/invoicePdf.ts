@@ -1,6 +1,7 @@
 import puppeteer from 'puppeteer';
 import path from 'node:path';
 import { supabaseAdmin } from '../lib/supabase.js';
+import { formatIstToDDMMYY, getNow } from '../utils/dateUtils.js';
 
 const INVOICE_BUCKET = 'invoices';
 
@@ -19,20 +20,9 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function formatDateDDMMYY(d: Date): string {
-  return d
-    .toLocaleDateString('en-IN', {
-      timeZone: 'Asia/Kolkata',
-      day: '2-digit',
-      month: '2-digit',
-      year: '2-digit',
-    })
-    .replace(/\//g, '-');
-}
-
 function buildInvoiceHtml(invoice: Record<string, unknown>): string {
   const invoiceId = String(invoice.invoice_number ?? invoice.id ?? '');
-  const invoiceDate = formatDateDDMMYY(new Date());
+  const invoiceDate = formatIstToDDMMYY(getNow());
 
   const creatorName = escapeHtml(String(invoice.creator_name ?? ''));
   const creatorPan = escapeHtml(String(invoice.pan_number ?? ''));

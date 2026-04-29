@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../lib/supabase.js';
 import { AuthenticatedRequest, UserProfile } from '../middleware/auth.js';
 import { appendInvoiceToSheet } from '../services/googleSheets.js';
 import { generateUploadAndPersistInvoicePdf } from '../services/invoicePdf.js';
+import { getIstYear } from '../utils/dateUtils.js';
 
 const router = Router();
 
@@ -423,7 +424,7 @@ router.post('/', async (req: AuthenticatedRequest, res: Response) => {
     }
 
     // Generate invoice ID: INV-{year}-{padded_number}
-    const year = new Date().getFullYear();
+    const year = getIstYear();
     const prefix = `INV-${year}-`;
 
     const { data: lastInvoice } = await supabaseAdmin
