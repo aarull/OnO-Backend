@@ -49,7 +49,9 @@ export async function appendInvoiceToSheet(invoice: Record<string, unknown>): Pr
     return;
   }
 
-  const now = getNow();
+  const createdAtRaw = invoice.created_at ?? (invoice as any).createdAt ?? (invoice as any).date;
+  const createdAt = createdAtRaw != null ? new Date(String(createdAtRaw)) : getNow();
+  const creationInstant = Number.isFinite(createdAt.getTime()) ? createdAt : getNow();
 
   const invoiceNumber = String(invoice.invoice_number ?? invoice.id ?? '');
   const gstin =
@@ -70,8 +72,8 @@ export async function appendInvoiceToSheet(invoice: Record<string, unknown>): Pr
   const totalToProcess = num(invoice.final_payable_amount);
 
   const row: (string | number)[] = [
-    formatIstToDDMMYY(now),
-    formatIstToMonthYear(now),
+    formatIstToDDMMYY(creationInstant),
+    formatIstToMonthYear(creationInstant),
     invoiceNumber,
     gstin,
     payeeName,
