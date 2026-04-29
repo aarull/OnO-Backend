@@ -535,6 +535,7 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
       status,
       rejection_note,
       note,
+      im_remark,
       tds_deducted,
       tds_amount,
       final_payable_amount,
@@ -657,6 +658,12 @@ router.patch('/:id/status', async (req: AuthenticatedRequest, res: Response) => 
       status,
       updated_at: new Date().toISOString(),
     };
+
+    if (typeof im_remark === 'string') {
+      updateData.im_remark = im_remark;
+    } else if (im_remark === null) {
+      updateData.im_remark = null;
+    }
 
     // If a new base amount is provided, always recompute derived accounting fields
     // server-side to avoid stale/incorrect totals.
