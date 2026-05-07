@@ -24,7 +24,7 @@ app.use('/api/health', healthRouter);
 app.use('/api/invoices', authMiddleware, invoicesRouter);
 app.use('/api/audit', authMiddleware, auditRouter);
 app.use('/api/profiles', profilesRouter);
-app.use('/api/creators', authMiddleware, creatorsRouter);
+app.use('/api/creators', creatorsRouter);
 
 // Start server
 app.listen(PORT, () => {
