@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { createClient } from '@supabase/supabase-js';
 import { supabaseAdmin } from '../lib/supabase.js';
 import { authMiddleware, AuthenticatedRequest } from '../middleware/auth.js';
 
@@ -28,34 +29,41 @@ router.post('/register', async (req: Request, res: Response) => {
     return;
   }
 
-  const { data, error } = await supabaseAdmin.auth.admin.createUser({
+  // Strict service-role admin client (bypass RLS and standard auth restrictions)
+  const localAdmin = createClient(
+    process.env.SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { auth: { autoRefreshToken: false, persistSession: false } },
+  );
+
+  const { data, error: signUpError } = await localAdmin.auth.admin.createUser({
     email: emailNorm,
     password,
-    email_confirm: true,
     user_metadata: { full_name: nameTrimmed },
+    email_confirm: true,
   });
 
-  if (error || !data?.user?.id) {
-    const msg = error?.message ?? 'Failed to create user';
-    const lower = msg.toLowerCase();
-    const status =
-      lower.includes('already') || lower.includes('registered') || lower.includes('exists') ? 409 : 400;
-    res.status(status).json({ error: msg });
+  if (signUpError || !data?.user?.id) {
+    console.error('creator register createUser error:', signUpError);
+    res.status(400).json({ error: signUpError?.message ?? 'Failed to create user' });
     return;
   }
 
   const userId = data.user.id;
 
-  const { error: roleError } = await supabaseAdmin.from('user_roles').insert({
-    user_id: userId,
-    email: emailNorm,
-    role: 'creator',
-  });
+  const { error: roleError } = await localAdmin
+    .from('user_roles')
+    .insert([{ user_id: userId, email: emailNorm, role: 'creator' }]);
 
   if (roleError) {
-    await supabaseAdmin.auth.admin.deleteUser(userId);
-    console.error('user_roles insert failed:', roleError);
-    res.status(500).json({ error: roleError.message });
+    console.error('creator register user_roles insert error:', roleError);
+    // Best-effort rollback to avoid orphaned auth users
+    try {
+      await localAdmin.auth.admin.deleteUser(userId);
+    } catch (rollbackErr) {
+      console.error('creator register rollback deleteUser error:', rollbackErr);
+    }
+    res.status(400).json({ error: roleError.message });
     return;
   }
 
